@@ -1,0 +1,405 @@
+---
+title: "Seruat"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,prompt= TRUE,comment='')
+```
+
+## R Markdown
+
+使用read_delim函数需要载入readr包
+如未安装，使用
+```{r,eval=FALSE}
+BiocManager::install('readr')
+```
+安装
+
+读取数据 
+--------------------------------------------------------------------
+### disease组数据
+```{r message=FALSE, warning=FALSE}
+library(readr)
+disease_barcodes <- read_delim("disease/filtered_feature_bc_matrix/barcodes.tsv.gz", 
+                           delim = "\t", escape_double = FALSE, 
+                           col_names = FALSE, trim_ws = TRUE)
+disease_features <- read_delim("disease/filtered_feature_bc_matrix/features.tsv.gz", 
+                       delim = "\t", escape_double = FALSE, 
+                       col_names = FALSE, trim_ws = TRUE)
+disease_matrix <- read.table("disease/filtered_feature_bc_matrix/matrix.mtx.gz", quote="\"", comment.char="%")
+View(disease_matrix)
+```
+查看数据
+```{r,prompt= TRUE,comment=''}
+head(disease_barcodes)
+```
+```{r,prompt= TRUE,comment=''}
+head(disease_features)
+```
+```{r,prompt= TRUE,comment=''}
+head(disease_matrix)
+```
+
+
+## normal组数据
+
+```{r message=FALSE}
+normal_barcodes <- read_delim("normal/filtered_feature_bc_matrix/barcodes.tsv.gz", 
+                               delim = "\t", escape_double = FALSE, 
+                               col_names = FALSE, trim_ws = TRUE)
+
+normal_features <- read_delim("normal/filtered_feature_bc_matrix/features.tsv.gz", 
+                               delim = "\t", escape_double = FALSE, 
+                               col_names = FALSE, trim_ws = TRUE)
+
+#去除前两行注释
+
+normal_matrix <- read.table("normal/filtered_feature_bc_matrix/matrix.mtx.gz", 
+                            quote="\"", 
+                            comment.char="%")
+```
+
+显示结果
+
+```{r,prompt= TRUE,comment=''}
+head(normal_barcodes)
+head(normal_features)
+head(normal_matrix)
+```
+
+
+Seurat后续分析 
+--------------------------------------------------------------------
+
+安装Seurat包
+
+```{r,eval=FALSE}
+BiocManager::install('Seurat')
+```
+
+载入需要的包
+
+```{r message=FALSE, warning=FALSE}
+library(Seurat)
+library(dplyr)
+library(Matrix)
+```
+
+
+## 读入数据
+### disease输入
+```{r message=FALSE}
+disease <- Read10X(data.dir = "disease/filtered_feature_bc_matrix/")
+dense.size <- object.size(x = as.matrix(x = disease))
+sparse.size <- object.size(x = disease)
+```
+
+结果展示
+
+```{r,prompt= TRUE,comment=''}
+dense.size
+sparse.size
+dense.size / sparse.size
+```
+
+### normal输入
+```{r}
+normal <- Read10X(data.dir = "normal/filtered_feature_bc_matrix/")
+dense.size <- object.size(x = as.matrix(x = normal))
+sparse.size <- object.size(x = normal)
+
+```
+
+结果展示
+
+```{r}
+dense.size
+sparse.size
+dense.size / sparse.size
+```
+
+
+
+## 从原始数据创造Seurat对象
+```{r}
+neurons <- CreateSeuratObject(counts = disease, min.cells = 3, min.genes = 200,  project = "disease")
+neurons
+```
+
+
+```{r}
+mito.genes <- grep(pattern = "^MT-", x = rownames(x=neurons), value = TRUE)
+percent.mito <- Matrix::colSums(neurons[mito.genes, ]) / Matrix::colSums(neurons)
+neurons <- AddMetaData(object = neurons, metadata = percent.mito, col.name = "percent.mito")
+```
+
+
+如果是serat2.0 使用以下语句
+```{r,eval=FALSE}
+VlnPlot(object = neurons, features = c( "nGene", "nUMI","percent.mito"), ncol = 3)
+```
+
+
+
+serat3.0 使用以下语句,用它用它
+```{r fig.height=5, fig.width=10}
+VlnPlot(object = neurons, features = c( "nCount_RNA", "nFeature_RNA","percent.mito"), ncol = 3)
+```
+
+
+## 展示变量和变量之间的相互关系
+FeatureScatter is typically used to visualize feature-feature relationships, but can be used for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+
+```{r fig.height=5, fig.width=10, message=FALSE, warning=FALSE}
+plot1 <- FeatureScatter(neurons, feature1 ="nCount_RNA", feature2 ="percent.mito")
+plot2 <- FeatureScatter(neurons, feature1 ="nCount_RNA", feature2 ="nFeature_RNA")
+CombinePlots(plots = list(plot1, plot2))
+```
+
+## 预处理
+
+之后我们对结果进行预处理，过滤具有超过2,500或小于200的独特特征计数的细胞（nFeature_RNA），过滤线粒体计数>5％的细胞（percent.mt）。
+同时对数据进行标准化，去除不同细胞测序深度的影响，之后进行对数化操作。
+```{r message=FALSE, warning=FALSE}
+pbmc <- subset(neurons, subset = nFeature_RNA >200& nFeature_RNA <2500& percent.mito <5)
+pbmc <- NormalizeData(pbmc, normalization.method ="LogNormalize", scale.factor =10000)
+```
+
+## 识别高度可变的 features (FindVariableFeatures)
+
+```{r}
+pbmc <- FindVariableFeatures(pbmc, selection.method ="vst", nfeatures =2000)
+```
+
+Identify the 10 most highly variable genes
+识别十个最显著的基因
+plot variable features with and without labels
+同时输出图像
+```{r fig.height=5, fig.width=10, message=FALSE, warning=FALSE}
+top10 <- head(VariableFeatures(pbmc),10)
+plot1 <- VariableFeaturePlot(pbmc)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel =TRUE)
+
+CombinePlots(plots = list(plot1, plot2))
+```
+
+## 缩放数据
+
+ScaleData即为将变量进行z分数转换，因为PCA默认输入变量服从正态分布
+```{r message=FALSE}
+all.genes <- rownames(pbmc)
+pbmc <- ScaleData(pbmc, features = all.genes)
+```
+
+
+##执行PCA
+```{r}
+pbmc <- RunPCA(pbmc, features = VariableFeatures(object = pbmc))
+```
+
+提供定义可视化细胞和功能的几种有用的方式PCA，包括VizDimReduction，DimPlot，和DimHeatmap
+展示PC1至PC5的前5个基因
+```{r}
+print(pbmc[["pca"]], dims =1:5, nfeatures =5)
+```
+
+### VizDimLoadings方法
+
+```{r fig.height=5, fig.width=10}
+VizDimLoadings(pbmc, dims =1:2, reduction ="pca")
+```
+
+### DimPlot方法
+
+```{r fig.height=5, fig.width=10}
+DimPlot(pbmc, reduction ="pca")
+```
+
+### DimHeatmap方法
+
+```{r fig.height=5, fig.width=10}
+DimHeatmap(pbmc, dims =1, cells =500, balanced =TRUE)
+```
+
+
+### 输出PC1至PC15
+```{r fig.height=10, fig.width=10}
+DimHeatmap(pbmc, dims =1:15, cells =500, balanced =TRUE)
+```
+
+### 确定数据集的“维度”
+
+NOTE:This process can take a long time for big datasets, comment out for expediency. 
+More approximate techniques such as those implemented in ElbowPlot() can be used to reduce computation time
+翻译：注意:对于大数据集，这个过程可能需要很长时间,本次分析使用了5分钟
+可以使用更近似的技术(如ElbowPlot()中实现的技术)来减少计算时间  
+
+#### JackStraw函数
+
+在JackStraw()函数中, 使用基于零分布的置换检验方法。随机抽取一部分基因(默认1%)然后进行pca分析得到pca分数，将这部分基因的pca分数与先前计算的pca分数进行比较得到显著性p-Value，。根据主成分（pc）所包含基因的p-value进行判断选择主成分。最终的结果是每个基因与每个主成分的关联的p-Value。保留下来的主成分是那些富集小的p-Value基因的主成分。
+JackStrawPlot()函数提供可视化方法，用于比较每一个主成分的p-value的分布，虚线是均匀分布；显著的主成分富集有小p-Value基因，实线位于虚线左上方。
+
+
+```{r fig.height=5, fig.width=10, message=FALSE, warning=FALSE}
+pbmc <- JackStraw(pbmc, num.replicate =100)
+
+pbmc <- ScoreJackStraw(pbmc, dims =1:20)
+
+JackStrawPlot(pbmc, dims =1:20)
+```
+
+
+#### ElbowPlot函数
+
+启发式评估方法生成一个Elbow plot图。在图中展示了每个主成分对数据方差的解释情况（百分比表示），并进行排序。根据自己需要选择主成分，图中发现第9个主成分是一个拐点，后续的主成分(PC)变化都不大了。
+
+
+
+```{r fig.height=5, fig.width=10}
+ElbowPlot(pbmc)
+```
+
+
+注意：鉴别数据的真实维度不是件容易的事情；除了上面两种方法，Serat官当文档还建议将主成分(数据异质性的相关来源有关)与GSEA分析相结合。
+
+Serat官当文档因此鼓励用户使用不同数量的PC（10、15，甚至50）重复下游分析。其实也将观察到的，结果通常没有显著差异。因此，在选择此参数时，可以尽量选大一点的维度，维度太小的话对结果会产生不好的影响。
+
+## 细胞聚类
+
+Seurat v3应用基于图形的聚类方法，例如KNN方法。具有相似基因表达模式的细胞之间绘制边缘，然后将他们划分为一个内联群体。
+
+在PhenoGraph中，首先基于pca维度中（先前计算的pca数据）计算欧式距离（the euclidean distance），然后根据两个细胞在局部的重合情况（Jaccard 相似系数）优化两个细胞之间的边缘权值。此步骤内置于FindNeighbors函数，输入时先前确定的pc数据。
+
+为了聚类细胞，接下来应用模块化优化技术迭代将细胞聚集在一起。（the Louvain algorithm (default) or SLM [SLM, Blondel et al., Journal of Statistical Mechanics]），FindClusters函数实现这一功能，其中需要注意resolution参数，该参数设置下游聚类分析的“granularity”，更大的resolution会导致跟多的细胞类群。3000左右的细胞量，设置resolution为0.4-1.2是比较合适的。细胞数据集越大，需要更大的resolution参数, 会获得更多的细胞聚类。
+查看细胞属于那个类群可以使用函数Idents。
+
+```{r}
+pbmc <- FindNeighbors(pbmc, dims = 1:20)
+pbmc <- FindClusters(pbmc, resolution = 0.5)
+```
+
+```{r}
+head(Idents(pbmc), 5)
+```
+
+
+
+## 非线性降维分析
+
+Seurat提供了一些非线性降维度分析的方法，如tSNE和UMAP，以可视化和探索这些数据集；这一步使用的数据建议与聚类分析使用的pc维度一致。
+
+使用uMAP方法进行降维分析
+
+```{r fig.height=5, fig.width=10, message=FALSE, warning=FALSE}
+pbmc_PCA <- RunUMAP(pbmc, dims =1:20)
+
+DimPlot(pbmc_PCA, reduction ="umap")
+
+```
+
+### 添加细胞类群xiba的标签
+
+```{r fig.height=5, fig.width=10}
+DimPlot(pbmc_PCA, reduction = "umap",label = TRUE)
+#或者使用
+#LabelClusters(DimPlot(pbmc_PCA, reduction = "umap"),id = 'ident')
+```
+
+
+
+
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+saveRDS(pbmc_PCA, file ="result/normal/pbmc_tutorial.rds")
+```
+
+
+
+## 寻找差异表达的特征（聚类生物标志物）
+
+Seurat可以通过差异表达分析寻找不同细胞类群的标记基因。FindMarkers函数可以进行此操作，但是默认寻找单个类群(参数ident.1)与其他所有类群阳性和阴性标记基因。FindAllMarkers函数会自动寻找每个类群和其他每个类群之间的标记基因。
+
+min.pct参数:设定在两个细胞群中任何一个被检测到的百分比，通过此设定不检测很少表达基因来缩短程序运行时间。默认0.1
+
+thresh.test参数：设定在两个细胞群中基因差异表达量。可以设置为0 ，程序运行时间会更长。
+
+max.cells.per.ident参数：每个类群细胞抽样设置；也可以缩短程序运行时间。
+
+寻找cluster1中的标志物
+
+```{r}
+cluster1.markers <- FindMarkers(pbmc_PCA, ident.1 =1, min.pct =0.25)
+
+head(cluster1.markers, n =5)
+
+```
+
+输出结果至csv文件
+
+```{r,eval=FALSE}
+write.csv(cluster1.markers,file = "result/normal/cluster1.markers.csv")
+```
+
+找出每个细胞簇的标记物，与所有剩余的细胞进行比较，只报告阳性细胞  
+
+```{r message=FALSE}
+pbmc.markers <- FindAllMarkers(pbmc_PCA, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+pbmc.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+```
+
+输出结果至CSV文件
+
+```{r,eval=FALSE}
+write.table(pbmc.markers,file = 'pbmc.markers.csv')
+```
+
+Seurat也可以通过参数test.use设定检验差异表达的方法
+
+## 可视化标记基因
+
+1.VlnPlot: 基于细胞类群的基因表达概率分布
+2.FeaturePlot：在tSNE 或 PCA图中画出基因表达情况
+3.RidgePlot，CellScatter，DotPlot
+
+使用S100A9和HBB举例
+
+```{r fig.height=5, fig.width=10}
+VlnPlot(pbmc, features = c("S100A9", "HBB"))
+```
+
+
+```{r fig.height=5, fig.width=10}
+FeaturePlot(pbmc_PCA, features = c("S100A9","HBB"))
+```
+
+DoHeatmap为指定的细胞和基因花表达热图。每个类群默认展示top 20标记基因
+
+```{r fig.height=20, fig.width=20}
+top10 <- pbmc.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DoHeatmap(pbmc_PCA, features = top10$gene) + NoLegend()
+```
+
+
+## 确定细胞聚类簇的种类
+根据不同的mark基因，即可确定细胞聚类簇的种类，关于不同细胞的mark基因，可在CellMarker网站上进行查询，进行人为标注。另外，也有基于生物信息学的客观的亚群鉴定方法（R包SingleR和celaref），但因可用的细胞亚型转录本缺乏，并未得到推广
+
+
+
+```{r,eval=FALSE}
+#举例说明，细胞种类名称请按照聚类簇的正确对照填写
+new.cluster.ids <- c("Naive CD4 T", "Memory CD4 T", "CD14+ Mono", "B", "CD8 T", "FCGR3A+ Mono", 
+    "NK", "DC", "Platelet")
+names(new.cluster.ids) <- levels(pbmc)
+pbmc <- RenameIdents(pbmc, new.cluster.ids)
+DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+
+
+
+
+
+
+
